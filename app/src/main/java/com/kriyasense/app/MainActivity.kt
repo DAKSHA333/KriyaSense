@@ -133,20 +133,22 @@ private fun tutorialFor(type: ExerciseType)=when(type) {
                     Spacer(Modifier.weight(1f))
                 }
                 "profile" -> {
-                    Text("Your setup",style=MaterialTheme.typography.headlineLarge)
-                    Text("Optional details personalize your setup only. BMI is informational, not medical advice.",color=Color.LightGray)
-                    OutlinedTextField(heightInput,{heightInput=it},label={Text("Height (cm)")},modifier=Modifier.fillMaxWidth())
-                    OutlinedTextField(weightInput,{weightInput=it},label={Text("Weight (kg)")},modifier=Modifier.fillMaxWidth())
-                    val draft=profile.copy(heightCm=heightInput.toDoubleOrNull(),weightKg=weightInput.toDoubleOrNull())
-                    Text("BMI: ${draft.bmi.display()}")
-                    Text("Experience",style=MaterialTheme.typography.titleMedium)
-                    Row(horizontalArrangement=Arrangement.spacedBy(6.dp)) { ExperienceLevel.entries.forEach { level -> FilterChip(selected=profile.experience==level,onClick={profile=profile.copy(experience=level)},label={Text(level.name.lowercase().replaceFirstChar { it.uppercase() })}) } }
-                    Text("Primary goal",style=MaterialTheme.typography.titleMedium)
-                    Column { FitnessGoal.entries.forEach { goal -> FilterChip(selected=profile.goal==goal,onClick={profile=profile.copy(goal=goal)},label={Text(goal.name.lowercase().replace('_',' ').replaceFirstChar { it.uppercase() })}) } }
-                    draft.validationError()?.let { Text(it,color=MaterialTheme.colorScheme.error) }
-                    Spacer(Modifier.weight(1f))
-                    Button(onClick={ if(draft.validationError()==null) { profileStore.save(draft); profile=draft; screen="select" } },modifier=Modifier.fillMaxWidth()) { Text("Continue") }
-                    TextButton(onClick={screen="select"},modifier=Modifier.fillMaxWidth()) { Text("Skip for now") }
+                    Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).imePadding(),verticalArrangement=Arrangement.spacedBy(12.dp)) {
+                        Text("Your setup",style=MaterialTheme.typography.headlineLarge)
+                        Text("Optional details personalize your setup only. BMI is informational, not medical advice.",color=Color.LightGray)
+                        OutlinedTextField(heightInput,{heightInput=it},label={Text("Height (cm)")},modifier=Modifier.fillMaxWidth())
+                        OutlinedTextField(weightInput,{weightInput=it},label={Text("Weight (kg)")},modifier=Modifier.fillMaxWidth())
+                        val draft=profile.copy(heightCm=heightInput.toDoubleOrNull(),weightKg=weightInput.toDoubleOrNull())
+                        Text("BMI: ${draft.bmi.display()}")
+                        Text("Experience",style=MaterialTheme.typography.titleMedium)
+                        Row(horizontalArrangement=Arrangement.spacedBy(6.dp)) { ExperienceLevel.entries.forEach { level -> FilterChip(selected=profile.experience==level,onClick={profile=profile.copy(experience=level)},label={Text(level.name.lowercase().replaceFirstChar { it.uppercase() })}) } }
+                        Text("Primary goal",style=MaterialTheme.typography.titleMedium)
+                        Column { FitnessGoal.entries.forEach { goal -> FilterChip(selected=profile.goal==goal,onClick={profile=profile.copy(goal=goal)},label={Text(goal.name.lowercase().replace('_',' ').replaceFirstChar { it.uppercase() })}) } }
+                        draft.validationError()?.let { Text(it,color=MaterialTheme.colorScheme.error) }
+                        Spacer(Modifier.height(8.dp))
+                        Button(onClick={ if(draft.validationError()==null) { profileStore.save(draft); profile=draft; screen="select" } },modifier=Modifier.fillMaxWidth()) { Text("Continue") }
+                        TextButton(onClick={screen="select"},modifier=Modifier.fillMaxWidth()) { Text("Skip for now") }
+                    }
                 }
                 "select" -> {
                     Text("Choose an exercise",style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.Bold)
