@@ -28,7 +28,7 @@ fun KriyaTheme(content: @Composable () -> Unit) {
             surfaceContainerHighest = DeepPurple,
             outline = MutedText, outlineVariant = PurpleSurface,
             error = TrackingError, onError = AppBackground,
-            errorContainer = CardSurface, onErrorContainer = TrackingError,
+            errorContainer = ErrorSurface, onErrorContainer = TrackingError,
             scrim = AppBackground
         ),
         typography = KriyaTypography,

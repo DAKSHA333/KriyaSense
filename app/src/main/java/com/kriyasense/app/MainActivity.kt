@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
+import androidx.activity.compose.BackHandler
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -38,6 +39,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.kriyasense.assessment.*
 import com.kriyasense.app.ui.theme.*
 import com.kriyasense.app.auth.*
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.semantics.semantics
@@ -77,7 +79,8 @@ private fun tutorialFor(type: ExerciseType)=when(type) {
     if(brandEntry) { BrandEntry(); return }
     if(!loggedIn) { AuthEntry(auth) { loggedIn=true }; return }
     val owner=LocalLifecycleOwner.current
-    var screen by remember { mutableStateOf("landing") }
+    val navigation = remember { ScreenBackStack("landing") }
+    val screen = navigation.screen
     var engine by remember { mutableStateOf<AssessmentEngine>(SquatEngine()) }
     var selectedType by remember { mutableStateOf(ExerciseType.SQUAT) }
     var selectedVariant by remember { mutableStateOf(ExerciseVariants.squatStandard) }
@@ -103,6 +106,24 @@ private fun tutorialFor(type: ExerciseType)=when(type) {
     var permission by remember { mutableStateOf(ContextCompat.checkSelfPermission(context,Manifest.permission.CAMERA)==PackageManager.PERMISSION_GRANTED) }
     val request=rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { permission=it }
     val voice=remember { VoiceFeedback(context) }
+    fun leaveCamera() {
+        if (screen == "camera") {
+            if (running) live=engine.pause()
+            running=false
+            voice.stop()
+            pose=null
+        }
+    }
+    fun navigateTo(destination: String) {
+        if (destination == screen) return
+        leaveCamera()
+        navigation.navigateTo(destination)
+    }
+    fun goBack() {
+        leaveCamera()
+        navigation.goBack()
+    }
+    BackHandler(enabled=navigation.canGoBack) { goBack() }
     DisposableEffect(Unit) { onDispose { voice.close() } }
     DisposableEffect(owner) {
         val observer=LifecycleEventObserver { _,event ->
@@ -126,7 +147,7 @@ private fun tutorialFor(type: ExerciseType)=when(type) {
             Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween,verticalAlignment=Alignment.CenterVertically) {
                 Text("KriyaSense",style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.Bold)
                 Row(verticalAlignment=Alignment.CenterVertically) {
-                    if(screen!="history" && screen!="historyDetail") TextButton(onClick={screen="history"}) { Text("History") }
+                    if(screen!="history" && screen!="historyDetail") TextButton(onClick={navigateTo("history")}) { Text("History") }
                 }
             }
             when(screen) {
@@ -139,7 +160,7 @@ private fun tutorialFor(type: ExerciseType)=when(type) {
                                 Text("MOVEMENT INTELLIGENCE",color=Lavender,style=MaterialTheme.typography.labelMedium)
                                 Text("Move with\nintention.",style=MaterialTheme.typography.displaySmall)
                                 Text("Understand your movement. Build better form, one session at a time.",color=PaleLavender)
-                                Button(onClick={screen="profile"},modifier=Modifier.fillMaxWidth().heightIn(min=56.dp)) { Text("Start Assessment") }
+                                Button(onClick={navigateTo("profile")},modifier=Modifier.fillMaxWidth().heightIn(min=56.dp)) { Text("Start Assessment") }
                                 Text("Includes your optional profile setup",color=SecondaryText,style=MaterialTheme.typography.bodySmall)
                             }
                         }
@@ -148,7 +169,7 @@ private fun tutorialFor(type: ExerciseType)=when(type) {
                         MetricRow("Workouts",overview.totalWorkouts.toString(),"Completed reps",overview.totalCompletedReps.toString())
                         if(overview.totalWorkouts>0) CompletionRing(overview.averageCompletionPercentage,"Average completion")
                         else Text("Your first assessment starts your story. Completed workouts will appear here.",color=SecondaryText)
-                        OutlinedButton(onClick={screen="history"},modifier=Modifier.fillMaxWidth()) { Text("Explore workout history") }
+                        OutlinedButton(onClick={navigateTo("history")},modifier=Modifier.fillMaxWidth()) { Text("Explore workout history") }
                         Text("ON-DEVICE ANALYSIS",color=Lavender,style=MaterialTheme.typography.labelMedium)
                         Text("Camera analysis happens on-device. Frames are not stored or uploaded.",style=MaterialTheme.typography.bodySmall,color=SecondaryText)
                     }
@@ -173,8 +194,8 @@ private fun tutorialFor(type: ExerciseType)=when(type) {
                         Column { FitnessGoal.entries.forEach { goal -> FilterChip(modifier=Modifier.fillMaxWidth().heightIn(min=48.dp),selected=profile.goal==goal,onClick={profile=profile.copy(goal=goal)},label={Text(goal.name.lowercase().replace('_',' ').replaceFirstChar { it.uppercase() })}) } }
                         draft.validationError()?.let { Text(it,color=Warning) }
                         Spacer(Modifier.height(8.dp))
-                        Button(onClick={ if(draft.validationError()==null) { profileStore.save(draft); profile=draft; screen="select" } },modifier=Modifier.fillMaxWidth().heightIn(min=56.dp)) { Text("Continue") }
-                        TextButton(onClick={screen="select"},modifier=Modifier.fillMaxWidth()) { Text("Skip for now") }
+                        Button(onClick={ if(draft.validationError()==null) { profileStore.save(draft); profile=draft; navigateTo("select") } },modifier=Modifier.fillMaxWidth().heightIn(min=56.dp)) { Text("Continue") }
+                        TextButton(onClick={navigateTo("select")},modifier=Modifier.fillMaxWidth()) { Text("Skip for now") }
                         HorizontalDivider(color=PurpleSurface)
                         Text("Account",style=MaterialTheme.typography.titleMedium)
                         Text(auth.email,color=SecondaryText,style=MaterialTheme.typography.bodyMedium)
@@ -206,7 +227,7 @@ private fun tutorialFor(type: ExerciseType)=when(type) {
                                     }
                                 }
                     }
-                    Button(onClick={screen=if(ExerciseVariants.forExercise(selectedType).size>1) "variants" else "tutorial"},modifier=Modifier.fillMaxWidth().heightIn(min=52.dp).testTag("start_camera")) { Text("View tutorial • ${selectedType.displayName}") }
+                    Button(onClick={navigateTo(if(ExerciseVariants.forExercise(selectedType).size>1) "variants" else "tutorial")},modifier=Modifier.fillMaxWidth().heightIn(min=52.dp).testTag("start_camera")) { Text("View tutorial • ${selectedType.displayName}") }
                     Text("Private by design. Camera frames are processed in memory and never saved or uploaded.",style=MaterialTheme.typography.bodySmall,color=SecondaryText)
                 }
                 "variants" -> {
@@ -214,13 +235,13 @@ private fun tutorialFor(type: ExerciseType)=when(type) {
                     Text(selectedType.displayName,color=Lavender,style=MaterialTheme.typography.labelLarge)
                     Text("Choose your version",style=MaterialTheme.typography.headlineLarge)
                     Text("Choose the version that fits your current training setup.",color=SecondaryText)
-                    ExerciseVariants.forExercise(selectedType).forEach { variant -> Card(Modifier.fillMaxWidth(),colors=CardDefaults.cardColors(containerColor=if(selectedVariant.id==variant.id) PurpleSurface else CardSurface)) { Column(Modifier.padding(14.dp)) {
+                    ExerciseVariants.forExercise(selectedType).forEach { variant -> Card(Modifier.fillMaxWidth(),colors=CardDefaults.cardColors(containerColor=if(selectedVariant.id==variant.id) PurpleSurface else CardSurface,contentColor=PrimaryText)) { Column(Modifier.padding(14.dp)) {
                         if(selectedVariant.id==variant.id) Text("CURRENT SELECTION",color=Lavender,style=MaterialTheme.typography.labelSmall)
                         Text(variant.displayName,style=MaterialTheme.typography.titleLarge); Text(variant.description,style=MaterialTheme.typography.bodySmall)
-                        Button(onClick={selectedVariant=variant; screen="tutorial"},modifier=Modifier.fillMaxWidth()) { Text("Select") }
+                        Button(onClick={selectedVariant=variant; navigateTo("tutorial")},modifier=Modifier.fillMaxWidth()) { Text("Select") }
                     } } }
                     }
-                    OutlinedButton(onClick={screen="select"},modifier=Modifier.fillMaxWidth()) { Text("Back") }
+                    OutlinedButton(onClick={goBack()},modifier=Modifier.fillMaxWidth()) { Text("Back") }
                 }
                 "tutorial" -> {
                     val tutorial=tutorialFor(selectedType)
@@ -237,9 +258,9 @@ private fun tutorialFor(type: ExerciseType)=when(type) {
                     tutorial.checks.forEach { Text("• $it") }
                     if(selectedType.experimental) Text("Experimental tracking: heel landmarks can vary by view and lighting.",color=Warning)
                     }
-                    Button(onClick={ activeChallenge=null; engine=ExerciseEngines.create(selectedType,selectedVariant.id); live=engine.current(); pose=null; started=false; running=false; cameraError=null; activeSessionId=UUID.randomUUID().toString(); screen="camera"; if(!permission) request.launch(Manifest.permission.CAMERA) },modifier=Modifier.fillMaxWidth().heightIn(min=56.dp)) { Text("Start Assessment") }
-                    challenge?.let { c -> OutlinedButton(onClick={ activeChallenge=c; engine=ExerciseEngines.create(selectedType,selectedVariant.id); live=engine.current(); pose=null; started=false; running=false; cameraError=null; activeSessionId=UUID.randomUUID().toString(); screen="camera"; if(!permission) request.launch(Manifest.permission.CAMERA) },modifier=Modifier.fillMaxWidth()) { Text("Try Challenge") } }
-                    OutlinedButton(onClick={screen="select"},modifier=Modifier.fillMaxWidth()) { Text("Back to exercises") }
+                    Button(onClick={ activeChallenge=null; engine=ExerciseEngines.create(selectedType,selectedVariant.id); live=engine.current(); pose=null; started=false; running=false; cameraError=null; activeSessionId=UUID.randomUUID().toString(); navigateTo("camera"); if(!permission) request.launch(Manifest.permission.CAMERA) },modifier=Modifier.fillMaxWidth().heightIn(min=56.dp)) { Text("Start Assessment") }
+                    challenge?.let { c -> OutlinedButton(onClick={ activeChallenge=c; engine=ExerciseEngines.create(selectedType,selectedVariant.id); live=engine.current(); pose=null; started=false; running=false; cameraError=null; activeSessionId=UUID.randomUUID().toString(); navigateTo("camera"); if(!permission) request.launch(Manifest.permission.CAMERA) },modifier=Modifier.fillMaxWidth()) { Text("Try Challenge") } }
+                    OutlinedButton(onClick={goBack()},modifier=Modifier.fillMaxWidth()) { Text("Back") }
                 }
                 "camera" -> {
                     Text("${selectedType.displayName} • ${selectedVariant.displayName}",style=MaterialTheme.typography.titleMedium)
@@ -247,7 +268,7 @@ private fun tutorialFor(type: ExerciseType)=when(type) {
                         Text("Camera access is needed to measure your movement. Allow access, or enable Camera in app settings if previously denied.")
                         Button(onClick={ request.launch(Manifest.permission.CAMERA) }) { Text("Allow camera") }
                         TextButton(onClick={ context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,Uri.parse("package:${context.packageName}"))) }) { Text("Open app settings") }
-                        TextButton(onClick={ screen="select" }) { Text("Back") }
+                        TextButton(onClick={ goBack() }) { Text("Back") }
                     } else {
                         activeChallenge?.let { challenge ->
                             val progress=FormChallenges.evaluate(challenge,engine.finish())
@@ -262,7 +283,19 @@ private fun tutorialFor(type: ExerciseType)=when(type) {
                                     voice.say(live.coaching)
                                 }
                             },onError={ cameraError=it; if(running) { running=false; live=engine.pause(); voice.stop() } })
-                            PoseOverlay(pose,mirror,if(mirrorCoachEnabled && selectedVariant.id=="SQUAT_STANDARD" && live.result.visibility==Visibility.SUFFICIENT) live.state else null)
+                            val coachActive=mirrorCoachEnabled && selectedVariant.id=="SQUAT_STANDARD"
+                            val guide=pose?.takeIf { coachActive && live.result.visibility==Visibility.SUFFICIENT }
+                                ?.let { SquatMirrorCoach.aligned(it,live.state) }
+                            PoseOverlay(pose,mirror,guide)
+                            if(coachActive) Column(
+                                Modifier.align(Alignment.BottomStart).padding(12.dp)
+                                    .background(AppBackground.copy(alpha=.9f),RoundedCornerShape(12.dp)).padding(8.dp),
+                                verticalArrangement=Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text("Solid purple: Your pose",color=Lavender,style=MaterialTheme.typography.labelSmall)
+                                Text("Dashed coral: Reference pose",color=ReferenceCoral,style=MaterialTheme.typography.labelSmall)
+                                if(running && guide==null) Text("Move back until your full body is visible.",color=PrimaryText,style=MaterialTheme.typography.bodySmall)
+                            }
                             Text(if(running) live.result.status.name.replace('_',' ') else if(started) "PAUSED" else "READY",
                                 Modifier.align(Alignment.TopStart).padding(12.dp).background(AppBackground.copy(alpha=0.85f),RoundedCornerShape(16.dp)).padding(10.dp),color=if(running && live.result.visibility!=Visibility.SUFFICIENT) TrackingError else if(running && live.result.status==Status.VALID) Success else Lavender)
                         }
@@ -270,7 +303,7 @@ private fun tutorialFor(type: ExerciseType)=when(type) {
                         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(10.dp)) {
                         Text(if(selectedType==ExerciseType.PLANK) live.result.holdDurationSeconds.display(" s hold") else "${live.result.completeReps} complete reps",style=MaterialTheme.typography.headlineLarge,color=PrimaryText)
                         if(selectedVariant.id=="SQUAT_STANDARD") Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.SpaceBetween) {
-                            Column(Modifier.weight(1f)) { Text("Mirror Coach",fontWeight=FontWeight.Bold); Text("Reference pose guide",style=MaterialTheme.typography.bodySmall,color=SecondaryText) }
+                            Column(Modifier.weight(1f)) { Text("Mirror Coach",fontWeight=FontWeight.Bold); Text("Standard Squat only",style=MaterialTheme.typography.bodySmall,color=SecondaryText) }
                             Switch(checked=mirrorCoachEnabled,onCheckedChange={mirrorCoachEnabled=it})
                         }
                         Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(18.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
@@ -298,7 +331,7 @@ private fun tutorialFor(type: ExerciseType)=when(type) {
                                     if(history.save(stored)) { currentStoredSession=stored; historyRevision++ }
                                     activeSessionId=null
                                 }
-                                result=completed; running=false; voice.stop(); pose=null; screen="results"
+                                result=completed; running=false; voice.stop(); pose=null; navigateTo("results")
                             },modifier=Modifier.weight(1f)) { Text("Finish") }
                         }
                     }
@@ -348,7 +381,7 @@ private fun tutorialFor(type: ExerciseType)=when(type) {
                         TextButton(onClick={showJson=!showJson}) { Text(if(showJson) "Hide SDK JSON" else "View SDK JSON") }
                         if(showJson) Text(result.toJson(),style=MaterialTheme.typography.bodySmall)
                     }
-                    Button(onClick={screen="select"},modifier=Modifier.fillMaxWidth().heightIn(min=56.dp)) { Text("New session") }
+                    Button(onClick={goBack()},modifier=Modifier.fillMaxWidth().heightIn(min=56.dp)) { Text("New session") }
                 }
                 "history" -> {
                     val sessions=remember(historyRevision) { history.sessions() }
@@ -374,19 +407,19 @@ private fun tutorialFor(type: ExerciseType)=when(type) {
                                 Text(session.completedAtEpochMs.dateTime(),style=MaterialTheme.typography.bodySmall,color=SecondaryText)
                                 Text("${session.completeReps} complete • ${session.totalAttempts} attempts • ${session.completionPercentage.display("%")}")
                                 session.mostCommonObservation?.let { Text(it.message,style=MaterialTheme.typography.bodySmall,color=SecondaryText) }
-                                TextButton(onClick={selectedHistorySession=session; screen="historyDetail"}) { Text("View details") }
+                                TextButton(onClick={selectedHistorySession=session; navigateTo("historyDetail")}) { Text("View details") }
                             } }
                             }
                         }
                     }
                     Row(horizontalArrangement=Arrangement.spacedBy(10.dp)) {
-                        OutlinedButton(onClick={screen="select"},modifier=Modifier.weight(1f)) { Text("Back") }
+                        OutlinedButton(onClick={goBack()},modifier=Modifier.weight(1f)) { Text("Back") }
                         if(sessions.isNotEmpty()) OutlinedButton(onClick={confirmClear=true},modifier=Modifier.weight(1f),colors=ButtonDefaults.outlinedButtonColors(contentColor=SecondaryText)) { Text("Clear history") }
                     }
                 }
                 "historyDetail" -> {
                     val session=selectedHistorySession
-                    if(session==null) screen="history" else Column(Modifier.weight(1f).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)) {
+                    if(session==null) LaunchedEffect(Unit) { goBack() } else Column(Modifier.weight(1f).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)) {
                         Text("Workout details",style=MaterialTheme.typography.headlineLarge)
                         Text("${session.exerciseName} • ${session.completedAtEpochMs.dateTime()}",color=Lavender)
                         PerformanceHero(session.completeReps,session.completionPercentage)
@@ -399,7 +432,7 @@ private fun tutorialFor(type: ExerciseType)=when(type) {
                         session.observations.forEach { observation -> Card(Modifier.fillMaxWidth()) { Text(observation.message,Modifier.padding(12.dp)) } }
                         Text("Historical metrics only — pose analysis cannot be replayed.",style=MaterialTheme.typography.bodySmall,color=SecondaryText)
                     }
-                    Button(onClick={screen="history"},modifier=Modifier.fillMaxWidth()) { Text("Back to history") }
+                    Button(onClick={goBack()},modifier=Modifier.fillMaxWidth()) { Text("Back to history") }
                 }
             }
         }
@@ -462,7 +495,7 @@ private fun tutorialFor(type: ExerciseType)=when(type) {
         onDispose { preview.removeCallbacks(start); pipeline.close() }
     }
 }
-@Composable private fun PoseOverlay(frame: PoseFrame?,mirror: Boolean,guidePhase: SquatState?=null) {
+@Composable private fun PoseOverlay(frame: PoseFrame?,mirror: Boolean,guide: Map<Int, Point>?=null) {
     val edges=listOf(11 to 12,11 to 13,13 to 15,12 to 14,14 to 16,11 to 23,12 to 24,23 to 24,23 to 25,25 to 27,24 to 26,26 to 28,27 to 29,29 to 31,28 to 30,30 to 32)
     Canvas(Modifier.fillMaxSize()) {
         if(frame==null) return@Canvas
@@ -473,9 +506,11 @@ private fun tutorialFor(type: ExerciseType)=when(type) {
         }
         edges.forEach { (a,b) -> val p=point(a); val q=point(b); if(p!=null && q!=null) drawLine(Lavender,p,q,3.dp.toPx()) }
         frame.landmarks.keys.forEach { point(it)?.let { p->drawCircle(PrimaryText,4.dp.toPx(),p) } }
-        val guide=guidePhase?.let { SquatMirrorCoach.aligned(frame,it) } ?: return@Canvas
+        if(guide==null) return@Canvas
+        val referenceColor=ReferenceCoral.copy(alpha=.95f)
+        val referenceDash=PathEffect.dashPathEffect(floatArrayOf(10.dp.toPx(),6.dp.toPx()))
         fun guidePoint(id: Int): Offset? { val p=guide[id] ?: return null; return Offset((if(mirror) 1-p.x else p.x).toFloat()*size.width,p.y.toFloat()*size.height) }
-        edges.forEach { (a,b) -> val p=guidePoint(a); val q=guidePoint(b); if(p!=null && q!=null) drawLine(Lavender.copy(alpha=.35f),p,q,2.dp.toPx()) }
-        listOf(23,24,25,26).forEach { guidePoint(it)?.let { p -> drawCircle(Lavender.copy(alpha=.45f),5.dp.toPx(),p) } }
+        edges.forEach { (a,b) -> val p=guidePoint(a); val q=guidePoint(b); if(p!=null && q!=null) drawLine(referenceColor,p,q,4.dp.toPx(),cap=StrokeCap.Round,pathEffect=referenceDash) }
+        guide.keys.forEach { guidePoint(it)?.let { p -> drawCircle(referenceColor,7.dp.toPx(),p,style=Stroke(width=3.dp.toPx())) } }
     }
 }

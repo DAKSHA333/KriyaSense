@@ -1,5 +1,7 @@
 package com.kriyasense.app.auth
 
+import androidx.activity.compose.BackHandler
+import com.kriyasense.app.ScreenBackStack
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -37,7 +39,9 @@ fun BrandEntry() {
 
 @Composable
 fun AuthEntry(auth: LocalAuth, onAuthenticated: () -> Unit) {
-    var screen by remember { mutableStateOf("login") }
+    val navigation = remember { ScreenBackStack("login") }
+    val screen = navigation.screen
+    BackHandler(enabled = navigation.canGoBack) { navigation.goBack() }
     // Changing forms discards passwords and validation messages.
     key(screen) {
         val signup = screen == "signup"
@@ -81,7 +85,7 @@ fun AuthEntry(auth: LocalAuth, onAuthenticated: () -> Unit) {
                         },
                         modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp), shape = RoundedCornerShape(50)
                     ) { Text(if (busy) "Please wait…" else if (signup) "Create Account" else "Login") }
-                    TextButton(enabled = !busy, onClick = { screen = if (signup) "login" else "signup" }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                    TextButton(enabled = !busy, onClick = { if (signup) navigation.goBack() else navigation.navigateTo("signup") }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
                         Text(if (signup) "Already have an account? Log In" else "Don't have an account? Sign Up", color = Lavender)
                     }
                     Text("Your prototype account stays on this device.", color = SecondaryText, style = MaterialTheme.typography.bodySmall)
