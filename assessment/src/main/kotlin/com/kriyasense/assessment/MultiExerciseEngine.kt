@@ -23,9 +23,15 @@ private fun PoseFrame.averageAngle(a: Triple<Int,Int,Int>, b: Triple<Int,Int,Int
     val x=angle(a.first,a.second,a.third) ?: return null; val y=angle(b.first,b.second,b.third) ?: return null
     return (x+y)/2
 }
+internal enum class TrackingSide { LEFT, RIGHT }
+internal data class ExerciseVisibility(val check: VisibilityCheck, val side: TrackingSide? = null)
 object ExerciseSignals {
+    private const val LUNGE_START_ANGLE=155.0
+    private const val LUNGE_BOTTOM_ANGLE=125.0
     private val lower=setOf(23,24,25,26,27,28)
     private val upper=setOf(11,12,13,14,15,16)
+    private val leftLeg=setOf(23,25,27); private val rightLeg=setOf(24,26,28)
+    private val leftArm=setOf(11,13,15); private val rightArm=setOf(12,14,16)
     fun requiredFor(type: ExerciseType): Set<Int> = when(type) {
         ExerciseType.LUNGE -> lower
         ExerciseType.PUSH_UP -> upper + setOf(23,24)
@@ -34,12 +40,41 @@ object ExerciseSignals {
         ExerciseType.JUMPING_JACK -> lower + upper
         else -> emptySet()
     }
-    fun forType(type: ExerciseType, frame: PoseFrame, heelBaseline: Double?): ExerciseSignal? = when(type) {
-        ExerciseType.LUNGE -> frame.averageAngle(Triple(23,25,27),Triple(24,26,28))?.let { knee ->
-            ExerciseSignal(knee>=160,knee<=105,((160-knee)/55*100).coerceIn(0.0,100.0),"Go lower",lower,"Knee angle",knee,"°")
+    internal fun visibilityFor(type: ExerciseType, frame: PoseFrame, preferredSide: TrackingSide?): ExerciseVisibility {
+        val chains = when(type) {
+            ExerciseType.LUNGE -> leftLeg to rightLeg
+            ExerciseType.PUSH_UP -> leftArm to rightArm
+            else -> return ExerciseVisibility(frame.assessRequiredLandmarks(requiredFor(type)))
         }
-        ExerciseType.PUSH_UP -> frame.averageAngle(Triple(11,13,15),Triple(12,14,16))?.let { elbow ->
-            ExerciseSignal(elbow>=155,elbow<=95,((155-elbow)/60*100).coerceIn(0.0,100.0),"Go lower",upper+setOf(23,24),"Elbow angle",elbow,"°")
+        val left=frame.assessRequiredLandmarks(chains.first)
+        val right=frame.assessRequiredLandmarks(chains.second)
+        if(preferredSide==TrackingSide.LEFT && left.sufficient) return ExerciseVisibility(left,TrackingSide.LEFT)
+        if(preferredSide==TrackingSide.RIGHT && right.sufficient) return ExerciseVisibility(right,TrackingSide.RIGHT)
+        if(left.sufficient && (!right.sufficient || left.confidence>=right.confidence)) return ExerciseVisibility(left,TrackingSide.LEFT)
+        if(right.sufficient) return ExerciseVisibility(right,TrackingSide.RIGHT)
+        return ExerciseVisibility(if(preferredSide==TrackingSide.RIGHT) right else left,preferredSide)
+    }
+    fun forType(type: ExerciseType, frame: PoseFrame, heelBaseline: Double?): ExerciseSignal? =
+        forTrackedSide(type,frame,heelBaseline,null)
+    internal fun forTrackedSide(type: ExerciseType, frame: PoseFrame, heelBaseline: Double?, side: TrackingSide?): ExerciseSignal? = when(type) {
+        ExerciseType.LUNGE -> {
+            val knee=when(side) {
+                TrackingSide.LEFT -> frame.angle(23,25,27)
+                TrackingSide.RIGHT -> frame.angle(24,26,28)
+                null -> frame.averageAngle(Triple(23,25,27),Triple(24,26,28))
+            }
+            knee?.let {
+                val rom=((LUNGE_START_ANGLE-it)/(LUNGE_START_ANGLE-LUNGE_BOTTOM_ANGLE)*100).coerceIn(0.0,100.0)
+                ExerciseSignal(it>=LUNGE_START_ANGLE,it<=LUNGE_BOTTOM_ANGLE,rom,"Go lower",when(side) { TrackingSide.LEFT->leftLeg; TrackingSide.RIGHT->rightLeg; null->lower },"Movement range",rom,"%")
+            }
+        }
+        ExerciseType.PUSH_UP -> {
+            val elbow=when(side) {
+                TrackingSide.LEFT -> frame.angle(11,13,15)
+                TrackingSide.RIGHT -> frame.angle(12,14,16)
+                null -> frame.averageAngle(Triple(11,13,15),Triple(12,14,16))
+            }
+            elbow?.let { ExerciseSignal(it>=155,it<=95,((155-it)/60*100).coerceIn(0.0,100.0),"Go lower",when(side) { TrackingSide.LEFT->leftArm; TrackingSide.RIGHT->rightArm; null->upper+setOf(23,24) },"Elbow angle",it,"°") }
         }
         ExerciseType.BICEP_CURL -> frame.averageAngle(Triple(11,13,15),Triple(12,14,16))?.let { elbow ->
             ExerciseSignal(elbow>=155,elbow<=55,((155-elbow)/100*100).coerceIn(0.0,100.0),"Curl higher",upper,"Elbow angle",elbow,"°")
@@ -73,18 +108,28 @@ class RepetitionExerciseEngine(private val type: ExerciseType, private val varia
     private val coach=CoachingFeedbackController()
     private var paused=false; private var lastTime: Long?=null; private var armed=false; private var moving=false; private var targetSeen=false
     private var stable=0; private var attemptStart=0L; private var maxRom=0.0; private var heelBaseline: Double?=null
+    private var trackingSide: TrackingSide?=null; private var visibilityDropouts=0
     private val reps=mutableListOf<Rep>(); private var confidenceSum=0.0; private var frames=0
     private var snapshot=LiveAssessment(SessionResult(exerciseId=type.id,exerciseName=type.displayName,variantId=variantId))
     override fun current()=snapshot
     override fun pause(): LiveAssessment { paused=true; snapshot=snapshot.copy(result=snapshot.result.copy(status=Status.PAUSED),instruction="Session paused",movementState="PAUSED"); return snapshot }
-    override fun resume() { paused=false; lastTime=null; stable=0 }
+    override fun resume() { paused=false; lastTime=null; stable=0; visibilityDropouts=0 }
     override fun finish()=snapshot.result.copy(timeline=reps.toList())
     override fun process(frame: PoseFrame): LiveAssessment {
         if(paused || (lastTime!=null && frame.timestampMs<=lastTime!!)) return snapshot
         lastTime=frame.timestampMs
-        val visibility=frame.assessRequiredLandmarks(ExerciseSignals.requiredFor(type))
-        if(!visibility.sufficient) return publishVisibility(frame.timestampMs,visibility.instruction)
-        val signal=ExerciseSignals.forType(type,frame,heelBaseline)
+        val selected=ExerciseSignals.visibilityFor(type,frame,trackingSide)
+        val visibility=selected.check
+        if(!visibility.sufficient) {
+            if(type in setOf(ExerciseType.LUNGE,ExerciseType.PUSH_UP) && ++visibilityDropouts<=VISIBILITY_GRACE_FRAMES) {
+                snapshot=snapshot.copy(currentRomPercentage=null,primaryMetricValue=null)
+                return snapshot
+            }
+            return publishVisibility(frame.timestampMs,visibility.instruction)
+        }
+        visibilityDropouts=0
+        trackingSide=selected.side
+        val signal=ExerciseSignals.forTrackedSide(type,frame,heelBaseline,trackingSide)
         if(signal==null) return publishNotDetected(frame.timestampMs)
         val visible=visibility.confidence
         if(type==ExerciseType.CALF_RAISE && heelBaseline==null) heelBaseline=(frame.point(29)!!.y+frame.point(30)!!.y)/2
@@ -112,7 +157,7 @@ class RepetitionExerciseEngine(private val type: ExerciseType, private val varia
         reps+=Rep(reps.size+1,complete,attemptStart/1000.0,end/1000.0,(end-attemptStart)/1000.0,maxRom,confidence,errors)
     }
     private fun publishVisibility(time: Long, instruction: String): LiveAssessment {
-        armed=false; moving=false; targetSeen=false; stable=0
+        armed=false; moving=false; targetSeen=false; stable=0; trackingSide=null
         val feedback=coach.select(CoachingFeedback("VISIBILITY",instruction,CoachingPriority.VISIBILITY),time)
         snapshot=snapshot.copy(result=result(Status.INSUFFICIENT_VISIBILITY,Visibility.INSUFFICIENT),kneeAngle=null,currentRomPercentage=null,instruction=feedback.message,coaching=feedback,movementState="TRACKING",primaryMetricValue=null)
         return snapshot
@@ -142,6 +187,7 @@ class RepetitionExerciseEngine(private val type: ExerciseType, private val varia
             romPercentage=reps.takeIf { it.isNotEmpty() }?.map { it.romPercentage }?.average(),
             formErrors=reps.flatMap { it.formErrors }.distinctBy { it.code },visibility=visibility,timeline=reps.toList(),driftDetected=drift.state==FormDriftState.DRIFTING,driftReasons=drift.reasons.map { it.name },variantId=variantId)
     }
+    private companion object { const val VISIBILITY_GRACE_FRAMES=2 }
 }
 
 /** Side-view, hold-only plank detection; it never produces repetitions. */

@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
+import android.widget.VideoView
 import androidx.activity.compose.BackHandler
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -68,6 +69,36 @@ private fun tutorialFor(type: ExerciseType)=when(type) {
     ExerciseType.JUMPING_JACK -> ExerciseTutorial("Leave room for arms and feet to open.",listOf("Start closed","Raise arms","Open stance"),listOf("Arm position","Stance width"),"jumping_jack_demo")
     ExerciseType.PLANK -> ExerciseTutorial("Use a clear side view of shoulders, hips and ankles.",listOf("Make a straight line","Hold steadily","Stay visible"),listOf("Shoulder–hip–ankle alignment","Hold duration"),"plank_demo")
     ExerciseType.CALF_RAISE -> ExerciseTutorial("Keep ankles and heels clearly visible.",listOf("Start standing","Raise heels","Return slowly"),listOf("Heel lift"),"calf_raise_demo")
+}
+
+@Composable private fun TutorialMedia(mediaFileName: String?) {
+    val context=LocalContext.current
+    val resourceId=when(mediaFileName) {
+        "squat_demo" -> R.raw.squat_demo
+        "lunge_demo" -> R.raw.lunge_demo
+        "jumping_jack_demo" -> R.raw.jumping_jack_demo
+        else -> null
+    }
+    var playbackFailed by remember(mediaFileName) { mutableStateOf(false) }
+    var videoView by remember(mediaFileName) { mutableStateOf<VideoView?>(null) }
+    DisposableEffect(mediaFileName) { onDispose { videoView?.stopPlayback() } }
+    Card(Modifier.fillMaxWidth().height(120.dp),colors=CardDefaults.cardColors(containerColor=PurpleSurface)) {
+        if(resourceId==null || playbackFailed) {
+            Box(Modifier.fillMaxSize(),contentAlignment=Alignment.Center) { Text("Exercise demo coming soon",color=SecondaryText) }
+        } else key(resourceId) {
+            AndroidView(
+                factory={ viewContext -> VideoView(viewContext).apply {
+                    videoView=this
+                    setVideoURI(Uri.parse("android.resource://${context.packageName}/$resourceId"))
+                    setOnPreparedListener { player -> player.isLooping=true; player.setVolume(0f,0f); start() }
+                    setOnCompletionListener { start() }
+                    setOnErrorListener { _,_,_ -> playbackFailed=true; true }
+                } },
+                update={ if(!it.isPlaying) it.start() },
+                modifier=Modifier.fillMaxSize()
+            )
+        }
+    }
 }
 
 @Composable private fun KriyaSense() {
@@ -251,7 +282,7 @@ private fun tutorialFor(type: ExerciseType)=when(type) {
                     Text(selectedVariant.displayName,style=MaterialTheme.typography.headlineLarge)
                     Text("Setup",color=Lavender,style=MaterialTheme.typography.labelLarge)
                     Text(tutorial.setup)
-                    Card(Modifier.fillMaxWidth().height(120.dp),colors=CardDefaults.cardColors(containerColor=PurpleSurface)) { Box(Modifier.fillMaxSize(),contentAlignment=Alignment.Center) { Text("Exercise demo coming soon",color=SecondaryText) } }
+                    TutorialMedia(tutorial.mediaFileName.takeIf { selectedType!=ExerciseType.SQUAT || selectedVariant.id==ExerciseVariants.squatStandard.id })
                     Text("Technique cues",style=MaterialTheme.typography.titleLarge)
                     tutorial.cues.forEach { Text("• $it") }
                     Text("What KriyaSense checks",style=MaterialTheme.typography.titleLarge)
