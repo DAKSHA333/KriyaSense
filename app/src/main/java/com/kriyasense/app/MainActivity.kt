@@ -39,7 +39,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.kriyasense.assessment.*
 import com.kriyasense.app.ui.theme.*
 import com.kriyasense.app.auth.*
-import androidx.compose.ui.graphics.PathEffect
+import com.kriyasense.app.ui.mirrorcoach.*
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.semantics.semantics
@@ -60,7 +60,7 @@ private fun Double?.display(unit: String="") = this?.let { "%.1f%s".format(it,un
 private fun Long.dateTime() = DateFormat.getDateTimeInstance(DateFormat.MEDIUM,DateFormat.SHORT).format(Date(this))
 private data class ExerciseTutorial(val setup: String,val cues: List<String>,val checks: List<String>,val mediaFileName: String)
 private fun tutorialFor(type: ExerciseType)=when(type) {
-    ExerciseType.SQUAT -> ExerciseTutorial("Stand side-on with your whole body in view.",listOf("Keep feet planted","Lower with control","Return to standing"),listOf("Knee angle","Movement depth and ROM","Configured form rules"),"squat_demo")
+    ExerciseType.SQUAT -> ExerciseTutorial("Stand facing the camera with your whole body in view.",listOf("Keep feet planted","Lower with control","Return to standing"),listOf("Knee angle","Movement depth and ROM","Configured form rules"),"squat_demo")
     ExerciseType.LUNGE -> ExerciseTutorial("Stand where hips, knees and ankles are visible.",listOf("Step and lower steadily","Reach depth","Return to start"),listOf("Knee angle","Movement range"),"lunge_demo")
     ExerciseType.PUSH_UP -> ExerciseTutorial("Keep shoulders, elbows, wrists and hips visible.",listOf("Lower with control","Use your arm range","Return to top"),listOf("Elbow angle","Movement range"),"push_up_demo")
     ExerciseType.BICEP_CURL -> ExerciseTutorial("Keep both arms visible from shoulder to wrist.",listOf("Start extended","Curl higher","Return to extension"),listOf("Elbow angle","Curl range"),"bicep_curl_demo")
@@ -274,6 +274,8 @@ private fun tutorialFor(type: ExerciseType)=when(type) {
                             val progress=FormChallenges.evaluate(challenge,engine.finish())
                             Text("${challenge.title.uppercase()}  ${progress.progress} / ${challenge.targetValue}",color=Lavender,style=MaterialTheme.typography.labelLarge)
                         }
+                        val mirrorProfile=remember(selectedType) { MirrorCoachProfiles.forExercise(selectedType) }
+                        val ghostController=remember(activeSessionId,mirrorProfile.exerciseId) { GhostPoseController(mirrorProfile) }
                         Box(Modifier.fillMaxWidth().weight(1.4f).background(AppBackground,RoundedCornerShape(24.dp))) {
                             CameraView(Modifier.fillMaxSize(),onPose={ frame,front ->
                                 lastPoseTime=SystemClock.uptimeMillis(); mirror=front
@@ -283,27 +285,17 @@ private fun tutorialFor(type: ExerciseType)=when(type) {
                                     voice.say(live.coaching)
                                 }
                             },onError={ cameraError=it; if(running) { running=false; live=engine.pause(); voice.stop() } })
-                            val coachActive=mirrorCoachEnabled && selectedVariant.id=="SQUAT_STANDARD"
-                            val guide=pose?.takeIf { coachActive && live.result.visibility==Visibility.SUFFICIENT }
-                                ?.let { SquatMirrorCoach.aligned(it,live.state) }
-                            PoseOverlay(pose,mirror,guide)
-                            if(coachActive) Column(
-                                Modifier.align(Alignment.BottomStart).padding(12.dp)
-                                    .background(AppBackground.copy(alpha=.9f),RoundedCornerShape(12.dp)).padding(8.dp),
-                                verticalArrangement=Arrangement.spacedBy(4.dp)
-                            ) {
-                                Text("Solid purple: Your pose",color=Lavender,style=MaterialTheme.typography.labelSmall)
-                                Text("Dashed coral: Reference pose",color=ReferenceCoral,style=MaterialTheme.typography.labelSmall)
-                                if(running && guide==null) Text("Move back until your full body is visible.",color=PrimaryText,style=MaterialTheme.typography.bodySmall)
-                            }
+                            val coachActive=mirrorCoachEnabled && selectedVariant.id==ExerciseVariants.standardId(selectedType)
+                            if(coachActive) GhostPoseOverlay(pose,live,running,mirror,activeSessionId,mirrorProfile,ghostController)
+                            PoseOverlay(pose,mirror)
                             Text(if(running) live.result.status.name.replace('_',' ') else if(started) "PAUSED" else "READY",
                                 Modifier.align(Alignment.TopStart).padding(12.dp).background(AppBackground.copy(alpha=0.85f),RoundedCornerShape(16.dp)).padding(10.dp),color=if(running && live.result.visibility!=Visibility.SUFFICIENT) TrackingError else if(running && live.result.status==Status.VALID) Success else Lavender)
                         }
                         cameraError?.let { Text(it,color=MaterialTheme.colorScheme.error) }
                         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(10.dp)) {
                         Text(if(selectedType==ExerciseType.PLANK) live.result.holdDurationSeconds.display(" s hold") else "${live.result.completeReps} complete reps",style=MaterialTheme.typography.headlineLarge,color=PrimaryText)
-                        if(selectedVariant.id=="SQUAT_STANDARD") Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.SpaceBetween) {
-                            Column(Modifier.weight(1f)) { Text("Mirror Coach",fontWeight=FontWeight.Bold); Text("Standard Squat only",style=MaterialTheme.typography.bodySmall,color=SecondaryText) }
+                        if(selectedVariant.id==ExerciseVariants.standardId(selectedType)) Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.SpaceBetween) {
+                            Column(Modifier.weight(1f)) { Text("Mirror Coach",fontWeight=FontWeight.Bold); Text(mirrorProfile.waitingText,style=MaterialTheme.typography.bodySmall,color=SecondaryText) }
                             Switch(checked=mirrorCoachEnabled,onCheckedChange={mirrorCoachEnabled=it})
                         }
                         Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(18.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
@@ -495,7 +487,7 @@ private fun tutorialFor(type: ExerciseType)=when(type) {
         onDispose { preview.removeCallbacks(start); pipeline.close() }
     }
 }
-@Composable private fun PoseOverlay(frame: PoseFrame?,mirror: Boolean,guide: Map<Int, Point>?=null) {
+@Composable private fun PoseOverlay(frame: PoseFrame?,mirror: Boolean) {
     val edges=listOf(11 to 12,11 to 13,13 to 15,12 to 14,14 to 16,11 to 23,12 to 24,23 to 24,23 to 25,25 to 27,24 to 26,26 to 28,27 to 29,29 to 31,28 to 30,30 to 32)
     Canvas(Modifier.fillMaxSize()) {
         if(frame==null) return@Canvas
@@ -506,11 +498,5 @@ private fun tutorialFor(type: ExerciseType)=when(type) {
         }
         edges.forEach { (a,b) -> val p=point(a); val q=point(b); if(p!=null && q!=null) drawLine(Lavender,p,q,3.dp.toPx()) }
         frame.landmarks.keys.forEach { point(it)?.let { p->drawCircle(PrimaryText,4.dp.toPx(),p) } }
-        if(guide==null) return@Canvas
-        val referenceColor=ReferenceCoral.copy(alpha=.95f)
-        val referenceDash=PathEffect.dashPathEffect(floatArrayOf(10.dp.toPx(),6.dp.toPx()))
-        fun guidePoint(id: Int): Offset? { val p=guide[id] ?: return null; return Offset((if(mirror) 1-p.x else p.x).toFloat()*size.width,p.y.toFloat()*size.height) }
-        edges.forEach { (a,b) -> val p=guidePoint(a); val q=guidePoint(b); if(p!=null && q!=null) drawLine(referenceColor,p,q,4.dp.toPx(),cap=StrokeCap.Round,pathEffect=referenceDash) }
-        guide.keys.forEach { guidePoint(it)?.let { p -> drawCircle(referenceColor,7.dp.toPx(),p,style=Stroke(width=3.dp.toPx())) } }
     }
 }
