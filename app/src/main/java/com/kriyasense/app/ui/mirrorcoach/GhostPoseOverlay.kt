@@ -1,6 +1,8 @@
 package com.kriyasense.app.ui.mirrorcoach
 
 import android.content.pm.ApplicationInfo
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -11,6 +13,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.layout.onSizeChanged
@@ -27,6 +30,8 @@ import kotlinx.coroutines.delay
 import java.util.Locale
 import kotlin.math.roundToInt
 
+private const val SHOW_MC_CALIBRATION_DEBUG=false
+
 @Composable
 fun GhostPoseOverlay(
     frame: PoseFrame?,live: LiveAssessment,running: Boolean,mirror: Boolean,
@@ -39,7 +44,8 @@ fun GhostPoseOverlay(
     LaunchedEffect(frame,live,running,controller) {
         output=controller.update(frame,live,running); renderedFrame=frame
         delay(250)
-        output=GhostOutput(GhostReadiness.TRACKING_LOST)
+        output=output.copy(readiness=GhostReadiness.TRACKING_LOST,calibrationDebug=output.calibrationDebug?.copy(
+            accepted=0,rejected="FRAME_TIMEOUT",stableMs=0))
     }
     val currentVisible=running && frame!=null && profile.criticalOptions.any { frame.assessRequiredLandmarks(it).sufficient }
     val trainerLayout=remember(output.calibratedBody,viewportSize,mirror,profile.exerciseId) {
@@ -47,22 +53,30 @@ fun GhostPoseOverlay(
             TrainerPoseTransform.create(profile,body,viewportSize.width.toDouble(),viewportSize.height.toDouble(),mirror)
         }
     }
-    val trainerJoints=remember(output.joints,trainerLayout,output.calibratedBody) {
+    val animatedScale by animateFloatAsState((trainerLayout?.pixelScale?:0.0).toFloat(),tween(400),label="trainerScale")
+    val animatedCenterX by animateFloatAsState((trainerLayout?.targetCenterX?:0.0).toFloat(),tween(400),label="trainerCenter")
+    val animatedFloorY by animateFloatAsState((trainerLayout?.targetFloorY?:0.0).toFloat(),tween(400),label="trainerFloor")
+    val animatedHeight by animateFloatAsState((trainerLayout?.trainerHeight?:0.0).toFloat(),tween(400),label="trainerHeight")
+    val displayedLayout=trainerLayout?.copy(pixelScale=animatedScale.toDouble(),targetCenterX=animatedCenterX.toDouble(),
+        targetFloorY=animatedFloorY.toDouble(),trainerHeight=animatedHeight.toDouble())
+    val trainerJoints=remember(output.joints,displayedLayout,output.calibratedBody) {
         val body=output.calibratedBody
         val sourceJoints=output.joints
-        if(body!=null && trainerLayout!=null && sourceJoints!=null) trainerLayout.transform(sourceJoints,body) else null
+        if(body!=null && displayedLayout!=null && sourceJoints!=null) displayedLayout.transform(sourceJoints,body) else null
     }
     Box(Modifier.fillMaxSize().onSizeChanged { viewportSize=it }) {
-        if(currentVisible && renderedFrame==frame) {
-            if(profile.referenceModel==ReferenceModel.SQUAT_FRONT && trainerLayout!=null && trainerJoints!=null) {
-                VirtualTrainerCanvas(trainerJoints,trainerLayout,profile.renderedEdges)
-                TrainerLabels(trainerLayout,viewportSize)
-            } else output.joints?.let { joints ->
+        if(profile.referenceModel==ReferenceModel.SQUAT_FRONT && running && displayedLayout!=null && trainerJoints!=null) {
+            VirtualTrainerCanvas(trainerJoints,displayedLayout,profile.renderedEdges)
+            TrainerLabels(displayedLayout,viewportSize)
+        } else if(currentVisible && renderedFrame==frame) {
+            output.joints?.let { joints ->
                 LegacyReferenceSkeleton(joints,profile.renderedEdges,mirror)
             }
         }
         val message=when {
             !running -> "Start your session to use Mirror Coach"
+            profile.referenceModel==ReferenceModel.SQUAT_FRONT && !output.personalized && output.calibratedBody!=null -> "Calibrating..."
+            profile.referenceModel==ReferenceModel.SQUAT_FRONT && output.readiness==GhostReadiness.TRACKING_LOST -> "Tracking paused • Trainer holding"
             !currentVisible || output.readiness==GhostReadiness.TRACKING_LOST -> "Step back into view to continue"
             output.readiness==GhostReadiness.WAITING -> profile.waitingText
             output.readiness==GhostReadiness.CALIBRATING -> "Calibrating Mirror Coach..."
@@ -72,7 +86,7 @@ fun GhostPoseOverlay(
             else -> "Mirror Coach Ready • Follow the lavender ghost"
         }
         Column(Modifier.align(Alignment.BottomStart).padding(12.dp),verticalArrangement=Arrangement.spacedBy(6.dp)) {
-            if(showDebug && output.readiness==GhostReadiness.READY && trainerLayout!=null) {
+            if(showDebug && SHOW_MC_CALIBRATION_DEBUG && output.readiness==GhostReadiness.READY && trainerLayout!=null) {
                 Text(String.format(Locale.US,"MC TRAINER • side=%s • progress=%.2f • scale=%.2f",
                     trainerLayout.side.name,output.progress,trainerLayout.relativeScale),
                     Modifier.background(AppBackground.copy(alpha=.9f),RoundedCornerShape(10.dp)).padding(horizontal=8.dp,vertical=5.dp),
@@ -80,6 +94,16 @@ fun GhostPoseOverlay(
             }
             Text(message,Modifier.background(AppBackground.copy(alpha=.9f),RoundedCornerShape(12.dp)).padding(8.dp),
                 color=PrimaryText,style=MaterialTheme.typography.bodySmall)
+        }
+        if(showDebug && SHOW_MC_CALIBRATION_DEBUG && profile.referenceModel==ReferenceModel.SQUAT_FRONT && output.readiness!=GhostReadiness.READY) {
+            output.calibrationDebug?.let { debug ->
+                val missing=debug.missing.ifEmpty { listOf("none") }.joinToString(", ")
+                Text("MC CALIBRATION\naccepted = ${debug.accepted} / ${debug.required}\nrejected = ${debug.rejected}\n"+
+                    "stableMs = ${debug.stableMs}\nvisibility = ${debug.visibility}\nmovement = ${debug.movement}\nmissing = $missing",
+                    Modifier.align(Alignment.TopEnd).padding(12.dp).widthIn(max=280.dp)
+                        .background(AppBackground.copy(alpha=.92f),RoundedCornerShape(12.dp)).padding(9.dp),
+                    color=PaleLavender,style=MaterialTheme.typography.labelSmall)
+            }
         }
     }
 }
@@ -110,7 +134,10 @@ private fun VirtualTrainerCanvas(joints: Map<Int,Point>,layout: TrainerLayout,ed
         val shoulderMid=if(ls!=null && rs!=null) Offset((ls.x+rs.x)/2,(ls.y+rs.y)/2) else null
         val headRadius=(h*.067f).coerceIn(14.dp.toPx(),34.dp.toPx())
         val headCenter=shoulderMid?.let { Offset(it.x,it.y-headRadius*1.22f) }
-        headCenter?.let { drawCircle(Lavender.copy(alpha=.14f),headRadius*1.34f,it) }
+        headCenter?.let { center ->
+            drawOval(Lavender.copy(alpha=.13f),Offset(center.x-headRadius*1.12f,center.y-headRadius*1.42f),
+                Size(headRadius*2.24f,headRadius*2.84f))
+        }
 
         // 2. Filled, simplified articulated body silhouette.
         if(ls!=null && rs!=null && lh!=null && rh!=null) {
@@ -122,36 +149,44 @@ private fun VirtualTrainerCanvas(joints: Map<Int,Point>,layout: TrainerLayout,ed
                 lineTo(lh.x-expand*.65f,lh.y+expand*.25f)
                 close()
             }
-            drawPath(torso,Lavender.copy(alpha=.14f))
+            drawPath(torso,Lavender.copy(alpha=.18f))
             val core=Path().apply {
                 moveTo(ls.x,ls.y); lineTo(rs.x,rs.y); lineTo(rh.x,rh.y); lineTo(lh.x,lh.y); close()
             }
-            drawPath(core,Lavender.copy(alpha=.32f))
+            drawPath(core,Lavender.copy(alpha=.46f))
+            drawLine(Lavender.copy(alpha=.48f),ls,rs,(h*.065f).coerceAtLeast(18.dp.toPx()),StrokeCap.Round)
+            drawLine(Lavender.copy(alpha=.45f),lh,rh,(h*.075f).coerceAtLeast(20.dp.toPx()),StrokeCap.Round)
         }
         limbLayers.forEach { (edge,width) ->
             val a=point(edge.first); val b=point(edge.second)
-            if(a!=null && b!=null) drawLine(Lavender.copy(alpha=.36f),a,b,width,StrokeCap.Round)
+            if(a!=null && b!=null) drawLine(Lavender.copy(alpha=.48f),a,b,width,StrokeCap.Round)
         }
-        headCenter?.let {
-            drawCircle(Lavender.copy(alpha=.36f),headRadius,it)
-            drawCircle(PaleLavender.copy(alpha=.16f),headRadius*.72f,Offset(it.x-headRadius*.12f,it.y-headRadius*.12f))
+        headCenter?.let { center ->
+            drawOval(Lavender.copy(alpha=.50f),Offset(center.x-headRadius*.82f,center.y-headRadius),
+                Size(headRadius*1.64f,headRadius*2f))
+            drawOval(PaleLavender.copy(alpha=.14f),Offset(center.x-headRadius*.55f,center.y-headRadius*.72f),
+                Size(headRadius*.97f,headRadius*1.34f))
+            shoulderMid?.let { shoulders ->
+                drawLine(Lavender.copy(alpha=.48f),Offset(center.x,center.y+headRadius*.82f),
+                    Offset(shoulders.x,shoulders.y+h*.018f),(h*.038f).coerceAtLeast(11.dp.toPx()),StrokeCap.Round)
+            }
         }
 
-        // 3. Bright articulated reference skeleton.
-        val boneWidth=(h*.012f).coerceIn(3.5.dp.toPx(),7.5.dp.toPx())
+        // 3. Subtle articulated reference inside the dominant silhouette.
+        val boneWidth=(h*.0085f).coerceIn(2.5.dp.toPx(),5.5.dp.toPx())
         edges.forEach { (a,b) ->
             val start=point(a); val end=point(b)
             if(start!=null && end!=null) {
-                drawLine(Lavender.copy(alpha=.20f),start,end,boneWidth*2.1f,StrokeCap.Round)
-                drawLine(PaleLavender.copy(alpha=.82f),start,end,boneWidth,StrokeCap.Round)
+                drawLine(Lavender.copy(alpha=.14f),start,end,boneWidth*2.0f,StrokeCap.Round)
+                drawLine(PaleLavender.copy(alpha=.48f),start,end,boneWidth,StrokeCap.Round)
             }
         }
 
         // 4. Bright joints and restrained joint glow.
-        val jointRadius=(h*.017f).coerceIn(5.dp.toPx(),10.dp.toPx())
+        val jointRadius=(h*.011f).coerceIn(3.5.dp.toPx(),7.dp.toPx())
         joints.keys.forEach { id -> point(id)?.let {
-            drawCircle(Lavender.copy(alpha=.20f),jointRadius*1.65f,it)
-            drawCircle(PaleLavender.copy(alpha=.92f),jointRadius,it)
+            drawCircle(Lavender.copy(alpha=.14f),jointRadius*1.6f,it)
+            drawCircle(PaleLavender.copy(alpha=.62f),jointRadius,it)
         } }
         for(ankle in listOf(27,28)) point(ankle)?.let { foot ->
             drawLine(Lavender.copy(alpha=.48f),Offset(foot.x-h*.026f,foot.y),Offset(foot.x+h*.036f,foot.y),

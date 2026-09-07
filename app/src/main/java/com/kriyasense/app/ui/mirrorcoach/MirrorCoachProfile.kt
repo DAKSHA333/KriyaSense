@@ -30,7 +30,7 @@ object MirrorCoachProfiles {
 
     private val profiles=ExerciseType.entries.associateWith { type -> when(type) {
         ExerciseType.SQUAT -> MirrorCoachProfile(type,PreferredView.FRONT,MirrorMovementType.REP_TRAJECTORY,
-            arms+legs,shoulders+legs,ReferenceModel.SQUAT_FRONT,torso+upper+lower,
+            shoulders+legs,shoulders+legs,ReferenceModel.SQUAT_FRONT,torso+upper+lower,
             listOf("stance","symmetric projected descent","hip lowering","knee lateral path","ankle contact","rhythm"),
             listOf("torso lean","shin angle","hip flexion","3D depth","arm position"),"Stand facing the camera with your full body visible")
         ExerciseType.LUNGE -> MirrorCoachProfile(type,PreferredView.SIDE,MirrorMovementType.REP_TRAJECTORY,

@@ -285,7 +285,8 @@ private fun tutorialFor(type: ExerciseType)=when(type) {
                                     voice.say(live.coaching)
                                 }
                             },onError={ cameraError=it; if(running) { running=false; live=engine.pause(); voice.stop() } })
-                            val coachActive=mirrorCoachEnabled && selectedVariant.id==ExerciseVariants.standardId(selectedType)
+                            val coachActive=mirrorCoachEnabled && selectedType==ExerciseType.SQUAT &&
+                                selectedVariant.id==ExerciseVariants.standardId(selectedType)
                             if(coachActive) GhostPoseOverlay(pose,live,running,mirror,activeSessionId,mirrorProfile,ghostController)
                             PoseOverlay(pose,mirror)
                             Text(if(running) live.result.status.name.replace('_',' ') else if(started) "PAUSED" else "READY",
@@ -294,7 +295,7 @@ private fun tutorialFor(type: ExerciseType)=when(type) {
                         cameraError?.let { Text(it,color=MaterialTheme.colorScheme.error) }
                         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(10.dp)) {
                         Text(if(selectedType==ExerciseType.PLANK) live.result.holdDurationSeconds.display(" s hold") else "${live.result.completeReps} complete reps",style=MaterialTheme.typography.headlineLarge,color=PrimaryText)
-                        if(selectedVariant.id==ExerciseVariants.standardId(selectedType)) Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.SpaceBetween) {
+                        if(selectedType==ExerciseType.SQUAT && selectedVariant.id==ExerciseVariants.standardId(selectedType)) Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.SpaceBetween) {
                             Column(Modifier.weight(1f)) { Text("Mirror Coach",fontWeight=FontWeight.Bold); Text(mirrorProfile.waitingText,style=MaterialTheme.typography.bodySmall,color=SecondaryText) }
                             Switch(checked=mirrorCoachEnabled,onCheckedChange={mirrorCoachEnabled=it})
                         }

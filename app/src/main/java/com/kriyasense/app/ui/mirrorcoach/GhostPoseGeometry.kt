@@ -14,12 +14,7 @@ object GhostPoseGeometry {
     fun generate(profile: MirrorCoachProfile,body: ProjectedBody,progress: Double): Map<Int,Point> {
         val p=progress.coerceIn(0.0,1.0)
         val pixels=when(profile.referenceModel) {
-            ReferenceModel.SQUAT_FRONT -> {
-                // Move into the useful part of the front-view reference earlier while preserving
-                // the same conservative standing and bottom constraints.
-                val depth=1.0-(1.0-p).pow(1.45)
-                lowerBody(body,165.0+(100.0-165.0)*depth,true)
-            }
+            ReferenceModel.SQUAT_FRONT -> squatFront(body,p)
             ReferenceModel.LUNGE_SIDE -> lowerBody(body,160.0+(105.0-160.0)*p,false)
             ReferenceModel.BICEP_CURL_FRONT -> arms(body,ArmModel.CURL,p)
             ReferenceModel.SHOULDER_PRESS_FRONT -> arms(body,ArmModel.PRESS,p)
@@ -28,7 +23,68 @@ object GhostPoseGeometry {
             ReferenceModel.PLANK_SIDE -> plank(body)
             ReferenceModel.JUMPING_JACK_FRONT -> jumpingJack(body,p)
         }
-        return pixels.mapValues { (_,v)->Point(v.x/body.width,v.y/body.height) }
+        return pixels.mapValues { (_,v)->Point(v.x/body.width,v.y/body.height,v.z/body.height) }
+    }
+
+    /**
+     * Symmetric front-view squat. Flexion is resolved with a two-link spatial construction so the
+     * front projection keeps knees near the planted feet instead of displaying an extreme bow.
+     * Z is presentation depth only and never leaves the Mirror Coach layer.
+     */
+    private fun squatFront(body: ProjectedBody,progress: Double): Map<Int,Point> {
+        val depth=progress*progress*(3.0-2.0*progress)
+        val base=body.points; val center=body.centerX; val floor=body.floorY
+        fun averageLength(vararg pairs: Pair<Int,Int>,fallback: Double)=pairs.mapNotNull { body.lengths[canonical(it.first,it.second)] }
+            .average().takeIf { it.isFinite() && it>0 } ?: fallback
+        val torso=averageLength(11 to 23,12 to 24,fallback=body.height*.24)
+        val thigh=averageLength(23 to 25,24 to 26,fallback=body.height*.19)
+        val shin=averageLength(25 to 27,26 to 28,fallback=body.height*.19)
+        val shoulderWidth=body.lengths[canonical(11,12)] ?: torso*.72
+        val hipWidth=body.lengths[canonical(23,24)] ?: shoulderWidth*.60
+        val measuredStance=if(27 in base && 28 in base) abs(base.getValue(28).x-base.getValue(27).x) else shoulderWidth
+        val stanceWidth=max(measuredStance,shoulderWidth*.82).coerceAtMost(shoulderWidth*1.15)
+        val hipHalf=hipWidth/2; val stanceHalf=stanceWidth/2
+        val kneeAngle=172.0+(100.0-172.0)*depth
+        val hipAnkle=sqrt((thigh*thigh+shin*shin-2*thigh*shin*cos(Math.toRadians(kneeAngle))).coerceAtLeast(0.0))
+        val hipDepth=-min(thigh,shin)*.10*depth
+        val horizontal=stanceHalf-hipHalf
+        val vertical=sqrt((hipAnkle*hipAnkle-horizontal*horizontal-hipDepth*hipDepth).coerceAtLeast(1.0))
+        val hipY=floor-vertical
+        val result=mutableMapOf<Int,Point>()
+        for(left in listOf(true,false)) {
+            val sign=if(left) -1 else 1
+            val hipId=if(left) 23 else 24; val kneeId=if(left) 25 else 26; val ankleId=if(left) 27 else 28
+            val hip=Point(center+sign*hipHalf,hipY,hipDepth)
+            val ankle=Point(center+sign*stanceHalf,floor,0.0)
+            val outward=min(stanceWidth*(.02+.06*depth),shin*.12)
+            val knee=spatialKnee(hip,thigh,ankle,shin,sign*outward)
+            result[hipId]=hip; result[kneeId]=knee; result[ankleId]=ankle
+        }
+        val shoulderHalf=shoulderWidth/2
+        val leanDepth=torso*.06*depth
+        val shoulderDepth=hipDepth+leanDepth
+        val torsoHorizontal=shoulderHalf-hipHalf
+        val torsoVertical=sqrt((torso*torso-torsoHorizontal*torsoHorizontal-leanDepth*leanDepth).coerceAtLeast(1.0))
+        val shoulderY=hipY-torsoVertical
+        result[11]=Point(center-shoulderHalf,shoulderY,shoulderDepth)
+        result[12]=Point(center+shoulderHalf,shoulderY,shoulderDepth)
+        addNeutralSquatArms(body,result)
+        return result
+    }
+
+    private fun spatialKnee(hip: Point,thigh: Double,ankle: Point,shin: Double,outwardFromAnkle: Double): Point {
+        val hx=hip.x-ankle.x; val hy=hip.y-ankle.y; val hz=hip.z-ankle.z
+        val distanceSquared=hx*hx+hy*hy+hz*hz
+        val kx=outwardFromAnkle
+        val yzRadiusSquared=(shin*shin-kx*kx).coerceAtLeast(0.0)
+        val yzAxisSquared=(hy*hy+hz*hz).coerceAtLeast(1e-8)
+        val dot=(shin*shin+distanceSquared-thigh*thigh)/2-hx*kx
+        val baseY=dot*hy/yzAxisSquared; val baseZ=dot*hz/yzAxisSquared
+        val offset=sqrt((yzRadiusSquared-dot*dot/yzAxisSquared).coerceAtLeast(0.0))
+        val axis=sqrt(yzAxisSquared)
+        val one=Point(ankle.x+kx,ankle.y+baseY-offset*hz/axis,ankle.z+baseZ+offset*hy/axis)
+        val two=Point(ankle.x+kx,ankle.y+baseY+offset*hz/axis,ankle.z+baseZ-offset*hy/axis)
+        return listOf(one,two).maxBy { it.z }
     }
 
     private fun lowerBody(body: ProjectedBody,kneeAngle: Double,front: Boolean): Map<Int,Point> {
@@ -57,13 +113,18 @@ object GhostPoseGeometry {
 
     /** Neutral presentation arms complete the trainer silhouette; they are not a form target. */
     private fun addNeutralSquatArms(body: ProjectedBody,result: MutableMap<Int,Point>) {
-        for(elbow in listOf(13,14).filter { it in body.points && it-2 in result && it+2 in body.points }) {
+        val torso=listOfNotNull(
+            body.lengths[canonical(11,23)],body.lengths[canonical(12,24)]
+        ).average().takeIf { it.isFinite() && it>0 } ?: body.height*.22
+        val shoulderWidth=body.lengths[canonical(11,12)] ?: torso*.68
+        for(elbow in listOf(13,14).filter { it-2 in result }) {
             val shoulder=elbow-2; val wrist=elbow+2; val side=if(elbow==13) -1 else 1
-            val upper=len(body,shoulder,elbow); val lower=len(body,elbow,wrist)
+            val upper=(body.lengths[canonical(shoulder,elbow)] ?: max(torso*.52,shoulderWidth*.68))
+            val lower=(body.lengths[canonical(elbow,wrist)] ?: max(torso*.48,shoulderWidth*.62))
             val s=result.getValue(shoulder)
-            val e=Point(s.x+side*upper*.30,s.y+upper*sqrt(1.0-.30*.30))
+            val e=Point(s.x+side*upper*.30,s.y+upper*sqrt(1.0-.30*.30),s.z)
             val inward=-side
-            val w=Point(e.x+inward*lower*.62,e.y-lower*sqrt(1.0-.62*.62))
+            val w=Point(e.x+inward*lower*.62,e.y-lower*sqrt(1.0-.62*.62),s.z)
             result[elbow]=e; result[wrist]=w
         }
     }

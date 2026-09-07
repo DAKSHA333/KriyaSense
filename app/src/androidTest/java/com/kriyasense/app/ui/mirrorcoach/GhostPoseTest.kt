@@ -75,10 +75,12 @@ class GhostPoseTest {
         fun target(type: ExerciseType): Pair<ProjectedBody,Map<Int,Point>> {
             val profile=MirrorCoachProfiles.forExercise(type); val body=GhostPoseController.calibrate(profile,frames(profile))!!
             val normalized=GhostPoseGeometry.generate(profile,body,1.0)
-            return body to normalized.mapValues { (_,p)->Point(p.x*body.width,p.y*body.height) }
+            return body to normalized.mapValues { (_,p)->Point(p.x*body.width,p.y*body.height,p.z*body.height) }
         }
         val (squatBody,squat)=target(ExerciseType.SQUAT)
-        assertEquals(squatBody.points.getValue(27),squat.getValue(27)); assertEquals(squatBody.points.getValue(28),squat.getValue(28))
+        val squatStanding=GhostPoseGeometry.generate(MirrorCoachProfiles.forExercise(ExerciseType.SQUAT),squatBody,0.0)
+        assertEquals(squatStanding.getValue(27).x*squatBody.width,squat.getValue(27).x,1e-8)
+        assertEquals(squatStanding.getValue(28).x*squatBody.width,squat.getValue(28).x,1e-8)
         assertTrue((squat.getValue(23).y+squat.getValue(24).y)/2>(squatBody.points.getValue(23).y+squatBody.points.getValue(24).y)/2)
         val (_,lunge)=target(ExerciseType.LUNGE)
         assertEquals(105.0,listOf(Geometry.angle(lunge.getValue(23),lunge.getValue(25),lunge.getValue(27))!!,
@@ -109,8 +111,9 @@ class GhostPoseTest {
                 val next=GhostPoseGeometry.generate(profile,body,step/100.0)
                 profile.renderedEdges.filter { it in anatomical || (it.second to it.first) in anatomical }.forEach { edge ->
                     if(edge.first in next && edge.second in next) {
-                        fun pixel(id: Int)=Point(next.getValue(id).x*body.width,next.getValue(id).y*body.height)
-                        val length=Geometry.distance(pixel(edge.first),pixel(edge.second))
+                        fun pixel(id: Int)=Point(next.getValue(id).x*body.width,next.getValue(id).y*body.height,next.getValue(id).z*body.height)
+                        val length=if(profile.exerciseType==ExerciseType.SQUAT) distance3(pixel(edge.first),pixel(edge.second))
+                            else Geometry.distance(pixel(edge.first),pixel(edge.second))
                         val baseline=body.lengths[GhostPoseGeometry.canonical(edge.first,edge.second)]
                         if(baseline!=null) assertEquals("${profile.exerciseId} $edge",baseline,length,1e-5)
                     }
@@ -122,6 +125,43 @@ class GhostPoseTest {
             assertTrue("${profile.exerciseId} has no trajectory",moved)
         }
     }
+
+    @Test fun standardSquatReferenceHasStableConnectedFrontViewKinematics() {
+        val profile=MirrorCoachProfiles.forExercise(ExerciseType.SQUAT)
+        val body=GhostPoseController.calibrate(profile,frames(profile))!!
+        fun pixels(progress: Double)=GhostPoseGeometry.generate(profile,body,progress).mapValues { (_,p)->
+            Point(p.x*body.width,p.y*body.height,p.z*body.height)
+        }
+        val standing=pixels(0.0); val bottom=pixels(1.0)
+        assertEquals(172.0,Geometry.angle(standing.getValue(23),standing.getValue(25),standing.getValue(27))!!,.01)
+        assertEquals(172.0,Geometry.angle(standing.getValue(24),standing.getValue(26),standing.getValue(28))!!,.01)
+        assertEquals(100.0,Geometry.angle(bottom.getValue(23),bottom.getValue(25),bottom.getValue(27))!!,.01)
+        assertEquals(100.0,Geometry.angle(bottom.getValue(24),bottom.getValue(26),bottom.getValue(28))!!,.01)
+        assertEquals(bottom.getValue(11).y,bottom.getValue(12).y,1e-8)
+        assertEquals(bottom.getValue(23).y,bottom.getValue(24).y,1e-8)
+        assertTrue(bottom.getValue(23).y-standing.getValue(23).y>body.height*.07)
+        assertTrue(bottom.getValue(25).x<=bottom.getValue(27).x)
+        assertTrue(bottom.getValue(26).x>=bottom.getValue(28).x)
+        assertTrue(bottom.getValue(25).x<bottom.getValue(26).x)
+        val baseline=pixels(0.0)
+        for(step in 0..100) {
+            val pose=pixels(step/100.0)
+            assertEquals(distance3(baseline.getValue(23),baseline.getValue(25)),distance3(pose.getValue(23),pose.getValue(25)),1e-5)
+            assertEquals(distance3(baseline.getValue(25),baseline.getValue(27)),distance3(pose.getValue(25),pose.getValue(27)),1e-5)
+            assertEquals(distance3(baseline.getValue(11),baseline.getValue(23)),distance3(pose.getValue(11),pose.getValue(23)),1e-5)
+            assertEquals(baseline.getValue(27),pose.getValue(27))
+            assertEquals(baseline.getValue(28),pose.getValue(28))
+            assertTrue(pose.values.all { it.x.isFinite() && it.y.isFinite() && it.z.isFinite() })
+            assertTrue(pose.getValue(23).x<pose.getValue(24).x && pose.getValue(25).x<pose.getValue(26).x)
+        }
+        val descent=pixels(.35); val matchingAscent=pixels(1.0-.65)
+        assertEquals(descent,matchingAscent)
+        assertNotEquals(standing,bottom)
+    }
+
+    private fun distance3(a: Point,b: Point)=kotlin.math.sqrt(
+        (a.x-b.x)*(a.x-b.x)+(a.y-b.y)*(a.y-b.y)+(a.z-b.z)*(a.z-b.z)
+    )
 
     @Test fun staticHoldNeverAnimates() {
         val profile=MirrorCoachProfiles.forExercise(ExerciseType.PLANK)
@@ -211,6 +251,50 @@ class GhostPoseTest {
         }
     }
 
+    @Test fun missingWristsAndLowConfidenceElbowsDoNotBlockSquatCalibration() {
+        val profile=MirrorCoachProfiles.forExercise(ExerciseType.SQUAT)
+        var missingWristOutput=GhostOutput(GhostReadiness.WAITING)
+        val missingWristController=GhostPoseController(profile)
+        repeat(12) { index ->
+            val source=frame(100+index*80L)
+            missingWristOutput=missingWristController.update(source.copy(landmarks=source.landmarks-setOf(15,16)),live(ExerciseType.SQUAT),true)
+        }
+        assertEquals(GhostReadiness.READY,missingWristOutput.readiness)
+        assertTrue(missingWristOutput.joints!!.keys.containsAll(setOf(13,14,15,16)))
+
+        var lowElbowOutput=GhostOutput(GhostReadiness.WAITING)
+        val lowElbowController=GhostPoseController(profile)
+        repeat(12) { index ->
+            val source=frame(100+index*80L)
+            val low=source.copy(landmarks=source.landmarks.mapValues { (id,l)->if(id in setOf(13,14)) l.copy(visibility=.2,presence=.2) else l })
+            lowElbowOutput=lowElbowController.update(low,live(ExerciseType.SQUAT),true)
+        }
+        assertEquals(GhostReadiness.READY,lowElbowOutput.readiness)
+    }
+
+    @Test fun unstableWristsDoNotResetCoreCalibration() {
+        val controller=GhostPoseController(MirrorCoachProfiles.forExercise(ExerciseType.SQUAT))
+        val first=controller.update(frame(100),live(ExerciseType.SQUAT),true)
+        assertEquals(1,first.calibrationDebug?.accepted)
+        val moved=controller.update(frame(180,shift=mapOf(15 to Point(470.0,300.0),16 to Point(330.0,760.0))),live(ExerciseType.SQUAT),true)
+        assertEquals("NONE",moved.calibrationDebug?.rejected)
+        assertEquals(2,moved.calibrationDebug?.accepted)
+        assertEquals(80L,moved.calibrationDebug?.stableMs)
+    }
+
+    @Test fun fallbackTrainerExistsBeforeCalibrationAndSurvivesTrackingLoss() {
+        val controller=GhostPoseController(MirrorCoachProfiles.forExercise(ExerciseType.SQUAT))
+        val calibrating=controller.update(frame(100),live(ExerciseType.SQUAT),true)
+        assertEquals(GhostReadiness.CALIBRATING,calibrating.readiness)
+        assertFalse(calibrating.personalized)
+        assertNotNull(calibrating.calibratedBody)
+        assertNotNull(calibrating.joints)
+        val lost=controller.update(null,live(ExerciseType.SQUAT),true)
+        assertEquals(GhostReadiness.TRACKING_LOST,lost.readiness)
+        assertEquals(calibrating.calibratedBody,lost.calibratedBody)
+        assertEquals(calibrating.joints,lost.joints)
+    }
+
     @Test fun aspectRatioAndDisplayMirroringDoNotChangeUnderlyingTarget() {
         val profile=MirrorCoachProfiles.forExercise(ExerciseType.BICEP_CURL)
         val a=GhostPoseController.calibrate(profile,frames(profile))!!
@@ -225,14 +309,18 @@ class GhostPoseTest {
         assertEquals(a.points.getValue(11).x,wide.points.getValue(11).x,1e-8)
     }
 
-    @Test fun trackingLossAndInvalidPlacementNeverRenderStaleGhost() {
+    @Test fun trackingLossFreezesTrainerAndInvalidPlacementFallsBackToNeutral() {
         val profile=MirrorCoachProfiles.forExercise(ExerciseType.SQUAT); val controller=GhostPoseController(profile)
-        assertNotNull(ready(controller).joints)
-        assertNull(controller.update(null,live(ExerciseType.SQUAT),true).joints)
-        assertEquals(GhostReadiness.TRACKING_LOST,controller.update(null,live(ExerciseType.SQUAT),true).readiness)
+        val readyJoints=ready(controller).joints
+        assertNotNull(readyJoints)
+        val lost=controller.update(null,live(ExerciseType.SQUAT),true)
+        assertEquals(readyJoints,lost.joints)
+        assertEquals(GhostReadiness.TRACKING_LOST,lost.readiness)
         val moved=frame(2000,shift=mapOf(27 to Point(520.0,1020.0),28 to Point(660.0,1020.0)))
-        assertEquals(GhostReadiness.REPOSITION,controller.update(moved,live(ExerciseType.SQUAT),true).readiness)
-        assertNull(controller.update(moved.copy(timestampMs=2080),live(ExerciseType.SQUAT),true).joints)
+        val reposition=controller.update(moved,live(ExerciseType.SQUAT),true)
+        assertEquals(GhostReadiness.REPOSITION,reposition.readiness)
+        assertNotNull(reposition.joints)
+        assertFalse(reposition.personalized)
     }
 
     @Test fun smoothedProgressIsRateLimitedAndContinuous() {

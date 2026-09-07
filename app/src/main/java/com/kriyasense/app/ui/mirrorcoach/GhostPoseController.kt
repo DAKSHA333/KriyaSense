@@ -8,7 +8,18 @@ data class GhostOutput(
     val readiness: GhostReadiness,
     val joints: Map<Int,Point>?=null,
     val progress: Double=0.0,
-    val calibratedBody: ProjectedBody?=null
+    val calibratedBody: ProjectedBody?=null,
+    val calibrationDebug: GhostCalibrationDebug?=null,
+    val personalized: Boolean=false
+)
+data class GhostCalibrationDebug(
+    val accepted: Int,
+    val required: Int=12,
+    val rejected: String,
+    val stableMs: Long,
+    val visibility: String,
+    val movement: String,
+    val missing: List<String>
 )
 
 /** Session-owned, read-only presentation state. It never writes to an assessment engine or result. */
@@ -23,31 +34,57 @@ class GhostPoseController(val profile: MirrorCoachProfile) {
     private var squatGuidePhase=SquatGuidePhase.IDLE
     private var squatReturnRequested=false
     private var squatBottomReachedAt: Long?=null
+    private var calibrationDurationMs=0L
+    private var fallbackBody: ProjectedBody?=null
+    private var lastJoints: Map<Int,Point>?=null
 
     fun update(frame: PoseFrame?,live: LiveAssessment,running: Boolean): GhostOutput {
-        if(!running) return hide(GhostReadiness.WAITING,false)
-        if(frame==null) return hide(GhostReadiness.TRACKING_LOST,false)
+        if(running && frame!=null && fallbackBody==null && profile.referenceModel==ReferenceModel.SQUAT_FRONT)
+            fallbackBody=defaultSquatBody(frame)
+        if(!running) return hide(GhostReadiness.WAITING,false,debug(frame,live,"SESSION_NOT_RUNNING",0,0),false)
+        if(frame==null) return hide(GhostReadiness.TRACKING_LOST,false,debug(null,live,"NO_POSE_FRAME",0,0))
         val selectedIndex=optionIndex ?: profile.calibrationOptions.indices.firstOrNull {
             frame.assessRequiredLandmarks(profile.calibrationOptions[it]).sufficient
         }
-        if(selectedIndex==null || !frame.assessRequiredLandmarks(profile.criticalOptions[selectedIndex]).sufficient)
-            return hide(GhostReadiness.TRACKING_LOST,false)
+        if(selectedIndex==null) {
+            val issue=firstLandmarkIssue(frame,profile.calibrationOptions.first())
+            return hide(GhostReadiness.TRACKING_LOST,false,debug(frame,live,issue?.reason?:"CALIBRATION_LANDMARKS_UNRELIABLE",0,0))
+        }
+        val criticalIssue=firstLandmarkIssue(frame,profile.criticalOptions[selectedIndex])
+        if(criticalIssue!=null)
+            return hide(GhostReadiness.TRACKING_LOST,false,debug(frame,live,criticalIssue.reason,0,0))
         val previous=lastTime
-        if(previous!=null && (frame.timestampMs<=previous || frame.timestampMs-previous>250))
-            return hide(GhostReadiness.TRACKING_LOST,false)
+        if(previous!=null && frame.timestampMs<=previous)
+            return hide(GhostReadiness.TRACKING_LOST,false,debug(frame,live,"FRAME_TIME_NOT_INCREASING",0,0))
+        if(previous!=null && frame.timestampMs-previous>250)
+            return hide(GhostReadiness.TRACKING_LOST,false,debug(frame,live,"FRAME_TIMEOUT",0,0))
         lastTime=frame.timestampMs
-        if(!viewMatches(frame,profile)) return hide(GhostReadiness.WAITING,false)
+        if(!viewMatches(frame,profile)) return hide(GhostReadiness.WAITING,false,debug(frame,live,"BODY_NOT_FRONT_FACING",0,0))
         val calibrated=body
         if(calibrated!=null && placementChanged(frame,calibrated,profile))
-            return hide(GhostReadiness.REPOSITION,true)
+            return hide(GhostReadiness.REPOSITION,true,debug(frame,live,"ANKLE_POSITION_CHANGED",0,0))
         if(body==null) {
             optionIndex=selectedIndex
             val calibrationIds=profile.calibrationOptions[selectedIndex]
-            if(!frame.assessRequiredLandmarks(calibrationIds).sufficient) return hide(GhostReadiness.CALIBRATING,false)
-            if(samples.isNotEmpty() && !stableAgainst(samples.first(),frame,calibrationIds)) samples.clear()
+            val calibrationIssue=firstLandmarkIssue(frame,calibrationIds)
+            if(calibrationIssue!=null)
+                return hide(GhostReadiness.CALIBRATING,false,debug(frame,live,calibrationIssue.reason,0,0))
+            val stabilityIssue=samples.firstOrNull()?.let { stabilityIssue(it,frame,calibrationIds) }
+            if(stabilityIssue!=null) {
+                samples.clear(); samples.add(frame)
+                val reason=if(stabilityIssue.landmark=="FRAME_DIMENSIONS") "FRAME_DIMENSIONS_CHANGED" else
+                    "MOVEMENT_TOO_HIGH (${stabilityIssue.landmark} ${stabilityIssue.distance.roundToInt()}px > ${stabilityIssue.threshold.roundToInt()}px)"
+                return visualOutput(GhostReadiness.CALIBRATING,debug(frame,live,reason,1,0))
+            }
             samples.add(frame)
-            if(samples.size<12 || frame.timestampMs-samples.first().timestampMs<800) return GhostOutput(GhostReadiness.CALIBRATING)
-            body=calibrate(profile,samples,calibrationIds) ?: run { samples.clear(); return GhostOutput(GhostReadiness.CALIBRATING) }
+            val stableMs=frame.timestampMs-samples.first().timestampMs
+            if(samples.size<12 || stableMs<800) return visualOutput(GhostReadiness.CALIBRATING,
+                debug(frame,live,"NONE",samples.size,stableMs))
+            body=calibrate(profile,samples,calibrationIds) ?: run {
+                samples.clear()
+                return visualOutput(GhostReadiness.CALIBRATING,debug(frame,live,"CALIBRATION_GEOMETRY_INVALID",0,0))
+            }
+            calibrationDurationMs=stableMs
             samples.clear(); progress=if(profile.movementType==MirrorMovementType.STATIC_HOLD) 1.0 else 0.0
         }
         val dt=if(previous==null) 0 else frame.timestampMs-previous
@@ -65,14 +102,68 @@ class GhostPoseController(val profile: MirrorCoachProfile) {
         }
         val joints=runCatching { GhostPoseGeometry.generate(profile,body!!,progress) }.getOrNull()
         if(joints==null || joints.values.any { !it.x.isFinite() || !it.y.isFinite() || it.x !in 0.0..1.0 || it.y !in 0.0..1.0 })
-            return hide(GhostReadiness.REPOSITION,true)
-        return GhostOutput(GhostReadiness.READY,joints,progress,body)
+            return hide(GhostReadiness.REPOSITION,true,debug(frame,live,"REFERENCE_COORDINATES_INVALID",0,0))
+        lastJoints=joints
+        return GhostOutput(GhostReadiness.READY,joints,progress,body,
+            debug(frame,live,"NONE",12,calibrationDurationMs),true)
     }
 
-    private fun hide(state: GhostReadiness,recalibrate: Boolean): GhostOutput {
+    private fun hide(state: GhostReadiness,recalibrate: Boolean,calibrationDebug: GhostCalibrationDebug?=null,keepTrainer: Boolean=true): GhostOutput {
         samples.clear(); lastTime=null
-        if(recalibrate) { body=null; progress=0.0; optionIndex=null; resetSquatGuide() }
-        return GhostOutput(state)
+        if(recalibrate) { body=null; progress=0.0; optionIndex=null; calibrationDurationMs=0; lastJoints=null; resetSquatGuide() }
+        return if(keepTrainer) visualOutput(state,calibrationDebug) else GhostOutput(state,calibrationDebug=calibrationDebug)
+    }
+
+    private fun visualOutput(state: GhostReadiness,calibrationDebug: GhostCalibrationDebug?): GhostOutput {
+        val personalizedBody=body
+        val visualBody=personalizedBody ?: fallbackBody
+        val visualJoints=lastJoints ?: visualBody?.let {
+            runCatching { GhostPoseGeometry.generate(profile,it,if(personalizedBody==null) 0.0 else progress) }.getOrNull()
+        }
+        return GhostOutput(state,visualJoints,progress,visualBody,calibrationDebug,personalizedBody!=null)
+    }
+
+    private data class LandmarkIssue(val landmark: String,val reason: String)
+    private data class StabilityIssue(val landmark: String,val distance: Double,val threshold: Double)
+
+    private fun firstLandmarkIssue(frame: PoseFrame,ids: Set<Int>): LandmarkIssue? {
+        for(id in ids.sorted()) {
+            val name=landmarkName(id); val landmark=frame.landmarks[id]
+            if(landmark==null) return LandmarkIssue(name,"${name}_MISSING")
+            if(!landmark.visibility.isFinite() || !landmark.presence.isFinite())
+                return LandmarkIssue(name,"${name}_CONFIDENCE_INVALID")
+            if(min(landmark.visibility,landmark.presence)<.65)
+                return LandmarkIssue(name,"${name}_LOW_CONFIDENCE")
+            if(landmark.position.x !in 0.0..1.0 || landmark.position.y !in 0.0..1.0)
+                return LandmarkIssue(name,"${name}_OUT_OF_FRAME")
+        }
+        return null
+    }
+
+    private fun stabilityIssue(first: PoseFrame,current: PoseFrame,ids: Set<Int>): StabilityIssue? {
+        if(first.width!=current.width || first.height!=current.height)
+            return StabilityIssue("FRAME_DIMENSIONS",Double.POSITIVE_INFINITY,0.0)
+        fun pixel(frame: PoseFrame,id: Int)=Point(frame.landmarks.getValue(id).position.x*frame.width,frame.landmarks.getValue(id).position.y*frame.height)
+        val scale=if(11 in ids && 23 in ids) Geometry.distance(pixel(first,11),pixel(first,23)) else first.height*.2
+        val threshold=max(8.0,scale*.05)
+        return ids.sorted().map { id -> StabilityIssue(landmarkName(id),Geometry.distance(pixel(first,id),pixel(current,id)),threshold) }
+            .firstOrNull { it.distance>it.threshold }
+    }
+
+    private fun debug(frame: PoseFrame?,live: LiveAssessment,rejected: String,accepted: Int,stableMs: Long): GhostCalibrationDebug? {
+        if(profile.referenceModel!=ReferenceModel.SQUAT_FRONT) return null
+        val required=profile.calibrationLandmarks
+        val missing=if(frame==null) required.sorted().map(::landmarkName) else required.sorted().filter { firstLandmarkIssue(frame,setOf(it))!=null }.map(::landmarkName)
+        val confidence=frame?.let { current -> required.mapNotNull { id -> current.landmarks[id]?.let { min(it.visibility,it.presence) } }.minOrNull() }
+        val visibility="assessment=${live.result.visibility.name} • calibrationMin=${confidence?.let { "%.2f".format(it) }?:"n/a"}/0.65"
+        return GhostCalibrationDebug(accepted,12,rejected,stableMs,visibility,"${live.movementState}/${live.state.name}",missing)
+    }
+
+    private fun landmarkName(id: Int)=when(id) {
+        11->"LEFT_SHOULDER"; 12->"RIGHT_SHOULDER"; 13->"LEFT_ELBOW"; 14->"RIGHT_ELBOW"
+        15->"LEFT_WRIST"; 16->"RIGHT_WRIST"; 23->"LEFT_HIP"; 24->"RIGHT_HIP"
+        25->"LEFT_KNEE"; 26->"RIGHT_KNEE"; 27->"LEFT_ANKLE"; 28->"RIGHT_ANKLE"
+        else->"LANDMARK_$id"
     }
 
     /**
@@ -125,7 +216,20 @@ class GhostPoseController(val profile: MirrorCoachProfile) {
                     !it.assessRequiredLandmarks(landmarks).sufficient }) return null
             fun median(values: List<Double>)=values.sorted()[values.size/2]
             fun point(id: Int)=Point(median(frames.map { it.landmarks.getValue(id).position.x*it.width }),median(frames.map { it.landmarks.getValue(id).position.y*it.height }))
-            val points=landmarks.associateWith(::point)
+            fun stableLength(a: Int,b: Int): Boolean {
+                if(frames.any { !it.assessRequiredLandmarks(setOf(a,b)).sufficient }) return false
+                val values=frames.map { current ->
+                    val one=current.landmarks.getValue(a).position; val two=current.landmarks.getValue(b).position
+                    Geometry.distance(Point(one.x*current.width,one.y*current.height),Point(two.x*current.width,two.y*current.height))
+                }
+                val middle=median(values); val tolerance=max(6.0,middle*.15)
+                return middle.isFinite() && middle>=6.0 && values.all { abs(it-middle)<=tolerance }
+            }
+            val optionalArms=if(profile.referenceModel==ReferenceModel.SQUAT_FRONT) buildSet {
+                if(stableLength(11,13) && stableLength(13,15)) addAll(setOf(13,15))
+                if(stableLength(12,14) && stableLength(14,16)) addAll(setOf(14,16))
+            } else emptySet()
+            val points=(landmarks+optionalArms).associateWith(::point)
             val lengths=segments.filter { (a,b)->a in points && b in points }.associate { (a,b)->
                 GhostPoseGeometry.canonical(a,b) to Geometry.distance(points.getValue(a),points.getValue(b))
             }
@@ -137,6 +241,31 @@ class GhostPoseController(val profile: MirrorCoachProfile) {
             val floorY=(if(floorIds.isEmpty()) points.values else floorIds.map { points.getValue(it) }).maxOf { it.y }
             val sideDirection=inferSideDirection(profile,points,centerX)
             return ProjectedBody(points,lengths,first.width,first.height,centerX,floorY,sideDirection)
+        }
+
+        private fun defaultSquatBody(frame: PoseFrame): ProjectedBody? {
+            if(frame.width<=0 || frame.height<=0) return null
+            val width=frame.width.toDouble(); val height=frame.height.toDouble()
+            val centerCandidates=listOf(11,12,23,24).mapNotNull { id -> frame.landmarks[id]?.position }
+                .filter { it.x.isFinite() && it.x in 0.0..1.0 }
+            val center=(centerCandidates.map { it.x }.averageOrNull()?.times(width) ?: width*.5).coerceIn(width*.18,width*.82)
+            val ankleCandidates=listOf(27,28).mapNotNull { id -> frame.landmarks[id]?.position }
+                .filter { it.y.isFinite() && it.y in 0.0..1.0 }
+            val floor=(ankleCandidates.maxOfOrNull { it.y*height } ?: height*.88).coerceIn(height*.68,height*.92)
+            val shoulderHalf=min(height*.075,width*.17)
+            val hipHalf=min(height*.047,width*.11)
+            val stanceHalf=min(height*.068,width*.15)
+            val shoulderY=floor-height*.60; val hipY=floor-height*.36; val kneeY=floor-height*.18
+            val points=mapOf(
+                11 to Point(center-shoulderHalf,shoulderY),12 to Point(center+shoulderHalf,shoulderY),
+                23 to Point(center-hipHalf,hipY),24 to Point(center+hipHalf,hipY),
+                25 to Point(center-stanceHalf,kneeY),26 to Point(center+stanceHalf,kneeY),
+                27 to Point(center-stanceHalf,floor),28 to Point(center+stanceHalf,floor)
+            )
+            val lengths=segments.filter { (a,b)->a in points && b in points }.associate { (a,b)->
+                GhostPoseGeometry.canonical(a,b) to Geometry.distance(points.getValue(a),points.getValue(b))
+            }
+            return ProjectedBody(points,lengths,frame.width,frame.height,center,floor,1)
         }
 
         private fun inferSideDirection(profile: MirrorCoachProfile,p: Map<Int,Point>,centerX: Double): Int {
